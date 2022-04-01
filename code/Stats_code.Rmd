@@ -1,0 +1,307 @@
+---
+title: "Social media use predicts clinical anxiety during Covid-19"
+author: "Jihan Ryu"
+date: "4/20/2021"
+output: html_document
+---
+
+```{r setup, include=TRUE, results="hide", message=FALSE}
+#knitr options
+knitr::opts_chunk$set(echo=TRUE, error=TRUE, warning=FALSE, message=FALSE)
+
+#load packages
+packages<-c("dplyr","tidyr","ggplot2","psych","ppcor","statsr","nlme")
+if (length(setdiff(packages, rownames(installed.packages()))) > 0) {
+  install.packages(setdiff(packages, rownames(installed.packages())))
+}
+lapply(packages, require, character.only=TRUE)
+```
+
+## Background
+
+Here, we will:
+1. **analyze the effect of belonging in clinical anxiety group (GAD-7>=10) and pre-lockdown (2/1/2021-3/13/2021) vs. post-lockdown (3/14/2021-5/3)** on users' changes in communication and social network app usage using repeated anova/linear mixed model, and
+2. **analyze the dose-dependent association of GAD-7 and median app usage in pre-lockdown and post-lockdown periods** using partial pearson's correlations/ Steiger's z test and
+3. **investigate significant differences** in demographic and clinical information between clinical anxiety (GAD-7>=10) and non-clinical anxiety group (GAD-7<10), as well as between missing users and non-missing users:
+
+## 1 
+```{r load and select smartphone data, results="hide"}
+#load datafile with social media app usage
+data<-read.csv("data.csv")
+
+#subset variables we want to use for analysis
+data_select<-data %>% 
+  dplyr::select(user, GAD7_SUM, age, date, Communication, Social)
+
+#mutate and identify variables in the correct format
+dfA<-data_select %>% 
+  mutate(Anxiety_Group = factor(case_when(GAD7_SUM >= 10 ~ "Clinical Anxiety",
+                GAD7_SUM <10 ~ "Non-Clinical Anxiety")), 
+         date = as.Date(data_select$date),
+         period = factor(case_when(
+           date < as.Date("2020-03-14") ~ "Pre-Lockdown", 
+           date >= as.Date("2020-03-14") & date < as.Date("2020-05-04") ~ "Lockdown")
+           ),
+         nCommunication = log(Communication),
+         nSocial = log(Social)) %>%  
+  filter(!is.na(period))
+```
+
+```{r subset consistent users, results="hide"}
+#summarize in unique individual data with the number of days each app was logged, median app usage in each period, and their anxiety group status.
+#then, restrict users to consistent users who logged on apps at least half the time in each period (pre-lockdown >=22 days, lockdown >=26 days)
+#communication app
+dfBc<-dfA %>% 
+  dplyr::group_by(user, period) %>% 
+         summarise(
+         N_c=sum(!is.na(nCommunication)), N_s=sum(!is.na(nSocial)),
+         v_c=median(nCommunication, na.rm=TRUE), v_s=median(nSocial, na.rm=TRUE),
+         gad=GAD7_SUM,
+         age=age,
+         group=Anxiety_Group
+         ) %>% 
+         distinct(user, .keep_all = TRUE) %>%  
+         filter(period == "Pre-Lockdown" & N_c >= 22 |
+                period == "Lockdown" & N_c >= 26) %>%
+         group_by(user) %>% 
+         mutate(present=n()) %>% 
+         filter(present==2)
+
+#social network app
+dfBs<-dfA %>% 
+  dplyr::group_by(user, period) %>% 
+         summarise(
+         N_c=sum(!is.na(nCommunication)), N_s=sum(!is.na(nSocial)),
+         v_c=median(nCommunication, na.rm=TRUE), v_s=median(nSocial, na.rm=TRUE),
+         gad=GAD7_SUM,
+         age=age,
+         group=Anxiety_Group
+         ) %>% 
+         distinct(user, .keep_all = TRUE) %>%  
+         filter(period == "Pre-Lockdown" & N_s >= 22 |
+                period == "Lockdown" & N_s >= 26) %>%
+         group_by(user) %>% 
+         mutate(present=n()) %>% 
+         filter(present==2)
+```
+
+```{r clean up app usage data for statistcal analyses, results="hide"}
+#divide data frame to generate summary statistics for each period / each app
+dfBc %>% filter(period=="Pre-Lockdown")->prc.data
+dfBc %>% filter(period=="Lockdown")->poc.data
+dfBs %>% filter(period=="Pre-Lockdown")->prs.data
+dfBs %>% filter(period=="Lockdown")->pos.data
+
+#restrict users with app data within z+/-2.5 to normalize in both periods (~97% sample retained)
+#communication app
+dfBc$zscore = ifelse(dfBc$period == "Pre-Lockdown",
+                         (dfBc$v_c-mean(prc.data$v_c))/
+                           (sd(prc.data$v_c)),
+                         (dfBc$v_c-mean(poc.data$v_c))/
+                           (sd(poc.data$v_c)))
+dfBc_id<-pivot_wider(dfBc, id_cols=user,names_from=period,values_from=zscore)
+dfBc_id$outlier = ifelse(dfBc_id$Lockdown< -2.5 | dfBc_id$Lockdown> 2.5 |
+                         dfBc_id$`Pre-Lockdown`< -2.5 | dfBc_id$`Pre-Lockdown`> 2.5,
+                         1, NA)
+dfBc<-merge(dfBc, dfBc_id[,c("user","outlier")], by="user", all.x=TRUE)
+dfBc<-dfBc %>% 
+  filter(is.na(outlier))
+
+#social network app
+dfBs$zscore = ifelse(dfBs$period == "Pre-Lockdown",
+                         (dfBs$v_s-mean(prs.data$v_s))/
+                           (sd(prs.data$v_s)),
+                         (dfBs$v_s-mean(pos.data$v_s))/
+                           (sd(pos.data$v_s)))
+dfBs_id<-pivot_wider(dfBs, id_cols=user,names_from=period,values_from=zscore)
+dfBs_id$outlier = ifelse(dfBs_id$Lockdown< -2.5 | dfBs_id$Lockdown> 2.5 |
+                         dfBs_id$`Pre-Lockdown`< -2.5 | dfBs_id$`Pre-Lockdown`> 2.5,
+                         1, NA)
+dfBs<-merge(dfBs, dfBs_id[,c("user","outlier")], by="user", all.x=TRUE)
+dfBs<-dfBs %>% 
+  filter(is.na(outlier))
+```
+
+```{r repeated anova using linear mixed effects model, results="hide"}
+#build mixed model with group, period, group*period as fixed effects and users as random effects
+#then run repeated anova test
+#communication app
+model.c = lme(v_c ~ group + period + group*period,
+          random = ~1|user, data=dfBc, method="REML")
+anova(model.c)
+
+#social network app
+model.s = lme(v_s ~ group + period + group*period,
+          random = ~1|user, data=dfBs, method="REML")
+anova(model.s)
+```
+
+## 2
+```{r partial pearsons correlation and Steiger's z test, results="hide"}
+#first, pivot the same users analyzed in repeated anova to wider form for individual to test significance in the correlations between GAD-7 and median app usage in entire period, pre-lockdown period, and lockdown period 
+dfBc_id<-pivot_wider(dfBc, id_cols=user,names_from=period,values_from=v_c)
+dfBs_id<-pivot_wider(dfBs, id_cols=user,names_from=period,values_from=v_s)
+
+#then merge with previous dataframe to identify variables needed for correlations
+dfBc_id<-merge(dfBc_id,
+      dfBc[,c("user","age","gad","group")],
+      by="user", all.x=TRUE)
+dfBs_id<-merge(dfBs_id,
+      dfBs[,c("user","age","gad","group")],
+      by="user", all.x=TRUE)
+
+#create mean of pre-lockdown and lockdown median usage for entire period usage index and remove duplicates
+dfBc_id<-dfBc_id %>% 
+  mutate(whole=((dfBc_id$`Pre-Lockdown`)+(dfBc_id$Lockdown))/2) %>% 
+  distinct(user, .keep_all = TRUE)
+dfBs_id<-dfBs_id %>% 
+  mutate(whole=((dfBs_id$`Pre-Lockdown`)+(dfBs_id$Lockdown))/2) %>% 
+  distinct(user, .keep_all = TRUE)
+
+#run partial correlations corrected with age in whole, pre-lockdown, lockdown period
+#also run prelockdown and lockdown app usage correlation for Steiger's z test
+#communication app
+pcor.test(dfBc_id$gad, dfBc_id$whole, dfBc_id$age,
+          method=c("pearson"))
+pcor.test(dfBc_id$gad, dfBc_id$`Pre-Lockdown`, dfBc_id$age,
+          method=c("pearson"))->xy1
+pcor.test(dfBc_id$gad, dfBc_id$Lockdown, dfBc_id$age,
+          method=c("pearson"))->xz1
+cor.test(dfBc_id$`Pre-Lockdown`, dfBc_id$Lockdown,
+          method=c("pearson"))->yz1
+
+#social network app
+pcor.test(dfBs_id$gad, dfBs_id$whole, dfBs_id$age,
+          method=c("pearson"))
+pcor.test(dfBs_id$gad, dfBs_id$`Pre-Lockdown`, dfBs_id$age,
+          method=c("pearson"))->xy2
+pcor.test(dfBs_id$gad, dfBs_id$Lockdown, dfBs_id$age,
+          method=c("pearson"))->xz2
+cor.test(dfBs_id$`Pre-Lockdown`, dfBs_id$Lockdown,
+          method=c("pearson"))->yz2
+
+#Steiger's z test to analyze differences in dependent correlations based on period
+paired.r(xy1$estimate, xz1$estimate, yz1$estimate, n=74, twotailed=TRUE)
+paired.r(xy2$estimate, xz2$estimate, yz2$estimate, n=42, twotailed=TRUE)
+```
+
+## 3
+```{r load and select clinical data, include=TRUE, results="hide", message=FALSE, fig.show="hide"}
+#first, in the original dataframe/dfA, we will remove users who did not have any communication app usage.
+#this will be our total study sample for running clinical analysis
+dfC<-dfA %>% 
+  dplyr::group_by(user) %>% 
+         summarise(
+         N_c=sum(!is.na(nCommunication)), N_s=sum(!is.na(nSocial)),
+         age=age,
+         group=Anxiety_Group
+         ) %>% 
+         distinct(user, .keep_all = TRUE) 
+dfC$outlier = ifelse(dfC$N_c==0, 1, NA)
+dfC<-dfC %>% 
+  filter(is.na(outlier))
+
+#subset clinical variables from raw data and remove duplicates
+##data dictionary
+#Lives_Alone <-0 or 1
+#FamStatus <- relationship status
+#CurrentActivity<- employment status
+#Covid10 <- 0 or 1: live with elderly in care?
+#Covid12 <- 0 or 1: PCR test
+#Covid19 <- 0 or 1: anybody you know died of COVID19? 
+#Covid21 <- 0 or 1: living with somebody with COVID19 positive 
+#Covid25 <- how would you rate your physical health in general? 
+#Covid34 <- anybody in your household who is essential health worker?
+#Covid37 <- worries about stability of your life situation?
+#Covid43 <- changes in the frequency of social interactions?
+#Covid45 <- types of social communication medium?
+
+#then merge clinical vars with the study samples' (n=142) anxiety group, age by user
+dfC<-merge(
+        data[,c("user", "Sex", "Lives_Alone", "FamStatus", "CurrentActivity", "Covid10", "Covid12", "Covid19", "Covid21", "Covid25", "Covid34", "Covid37", "Covid43", "Covid45")],
+        dfC[,c("user","age","group")], 
+        by="user", all.x=FALSE)
+dfC<-dfC %>% 
+  distinct(user, .keep_all=TRUE)
+
+#identify variables in correct format
+dfC[1:14]<-lapply(dfC[1:14], factor)
+
+#re-level certain ordinal items to optimize statistical power in tests
+levels(dfC$Sex) <- c("Mujer", "Varon", NA, NA, NA, NA)
+levels(dfC$Covid12) <- c("No", "No", "Si", NA)
+levels(dfC$Covid25) <- c("Positive", "Positive", "Negative", "Positive", "Regular")
+levels(dfC$Covid43) <- c("Same","High","Low","High","Low")
+levels(dfC$Covid45) <- c("Llamadas telefónicas", "Mensajeria: whasapp/ telegram/ otros", NA, "Videollamadas")
+```
+```{r descriptives, results="hide", fig.show="hide"}
+#t.test for comparison of mean continuous variables between anxiety groups
+#age, GAD-7 
+inference(y = age, x = group, data = dfC, statistic = "mean", type = "ci", conf_level = 0.95, method = "theoretical", alternative = "two.sided")
+t.test(age ~ group, dfC)
+
+#z.test for comparison of sample proportions in binary categorical variables between anxiety groups
+#gender, living alone status, coronavirus exposure risk items, and diagnosis
+inference(y = group, x = Sex, data = dfC, statistic = "proportion", type = "ht", method = "theoretical", success = "Clinical Anxiety", alternative = "twosided")
+inference(y = group, x = Lives_Alone, dfC, statistic = "proportion", type = "ht", method = "theoretical", success = "Clinical Anxiety", alternative = "twosided")
+inference(y = group, x = Covid10, dfC, statistic = "proportion", type = "ht", method = "theoretical", success = "Clinical Anxiety", alternative = "twosided")
+inference(y = group, x = Covid12, dfC, statistic = "proportion", type = "ht", method = "theoretical", success = "Clinical Anxiety", alternative = "twosided")
+inference(y = group, x = Covid19, dfC, statistic = "proportion", type = "ht", method = "theoretical", success = "Clinical Anxiety", alternative = "twosided")
+inference(y = group, x = Covid21, dfC, statistic = "proportion", type = "ht", method = "theoretical", success = "Clinical Anxiety", alternative = "twosided")
+inference(y = group, x = Covid34, dfC, statistic = "proportion", type = "ht", method = "theoretical", success = "Clinical Anxiety", alternative = "twosided")
+
+#chi.square test for comparison of sample proportions in >2-level categorical variables between anxiety groups
+#relationship status, employment status, self-ratings of health, worries about life instability, changes in social interaction frequency, types of social interaction medium
+table(dfC$FamStatus, dfC$group) -> FamStatus
+table(dfC$CurrentActivity, dfC$group) -> CurrentActivity
+table(dfC$Covid25, dfC$group) -> Covid25 
+table(dfC$Covid37, dfC$group) -> Covid37
+table(dfC$Covid43, dfC$group) -> Covid43
+table(dfC$Covid45, dfC$group) -> Covid45
+prop.table(FamStatus, margin = 2) 
+chisq.test(FamStatus)
+prop.table(CurrentActivity, margin = 2) 
+chisq.test(CurrentActivity)
+prop.table(Covid25, margin = 2) 
+chisq.test(Covid25)
+prop.table(Covid37, margin = 2) 
+chisq.test(Covid37)
+prop.table(Covid43, margin = 2) 
+chisq.test(Covid43)
+prop.table(Covid45, margin = 2) 
+chisq.test(Covid45)
+
+#load dx datafile
+dx<-read.csv("dx.csv")
+
+#merge cleaned up dataframe from above with dx files
+dfD<-merge(dfC, 
+           dx[,c("user", "dx_anyAD", "dx_PTSD", "dx_adaptD", "dx_agoraphobia", "dx_anxiety_stress","dx_uniDD", "dx_BD", "dx_mood", "dx_psychosis", "dx_personality", "dx_SUD.abs", "dx_SUD.nonAbs", "dx_substance_use", "dx_sleep", "dx_anyED", "dx_ICD", "dx_ADHD", "dx_GdT", "dx_misc", "dx_other")], 
+           by = "user")
+
+#z.test for comparison of sample proportions in binary dx variables between anxiety groups
+#sample variable dx_anxiety stress, repeat for all other dx
+inference(y = group, x = dx_anxiety_stress, data = dfD, statistic = "proportion", type = "ht", method = "theoretical", success = "Clinical Anxiety", alternative = "twosided")
+```
+
+
+```{r missing user analysis, results="hide"}
+#users included in repeated anova were labeled "non-missing," if else "non-missing"
+#then, merge with the cleaned up data frame above
+#communication
+dfBc_id$mu_c<-"non-missing"
+muc<-merge(dfD, dfBc_id[,c("user","mu_c")], by="user", all.x=TRUE)
+muc$mu_c<-factor(ifelse(is.na(muc$mu_c),
+                 "missing","non-missing"))
+
+#social network
+dfBs_id$mu_s<-"non-missing"
+mus<-merge(dfD, dfBs_id[,c("user","mu_s")], by="user", all.x=TRUE)
+mus$mu_s<-factor(ifelse(is.na(mus$mu_s),
+                 "missing","non-missing"))
+
+#repeat descriptive statistical analyses from line 237-272, 282-284 using dataframe muc
+#repeat descriptive statistical analyses from line 237-272, 282-284 using dataframe mus
+```
+
+
